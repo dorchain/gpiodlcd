@@ -43,8 +43,9 @@
 #include <errno.h>
 #include <assert.h>
 #include <sysexits.h>
+#include <stdint.h>
+#include <gpiod.h>
 
-#include <sys/gpio.h>
 
 /******************************************************************************
  * Driver for the Hitachi HD44780.  This is probably *the* most common driver
@@ -68,7 +69,7 @@
 static void	usage(void);
 static char	*progname;
 
-#define	DEFAULT_DEVICE	"/dev/gpioc0"
+#define	DEFAULT_DEVICE	"/dev/gpiochip1"
 
 enum command {
 	CMD_RESET,
@@ -102,8 +103,13 @@ enum hd_pin_id {
 	HD_PIN_COUNT,
 };
 
+typedef struct {
+	struct gpiod_chip *chip;
+	struct gpiod_line *lines[HD_PIN_COUNT];
+} gpio_pins;
+
 static struct hd44780_state {
-	int	hd_fd;
+	gpio_pins	hd_gpio;
 	int	hd_ifwidth;
 	int	hd_lines;
 	int	hd_cols;
@@ -142,14 +148,16 @@ main(int argc, char *argv[])
 		progname = argv[0];
 	}
 
+	state->hd_bl_on = 1;
 	state->hd_lines = 2;
-	state->hd_cols = 20;
+	state->hd_cols = 16;
 	state->hd_ifwidth = 4;
 	for (i = 0; i < HD_PIN_COUNT; i++)
 		state->pins[i] = -1;
 	state->pins[HD_PIN_RS] = 0;
 	state->pins[HD_PIN_RW] = 1;
 	state->pins[HD_PIN_E] = 2;
+	state->pins[HD_PIN_BL] = 3;
 	state->pins[HD_PIN_DAT0] = 4;
 
 	while ((ch = getopt(argc, argv, "BCdD:E:f:Fh:I:L:OR:w:W:")) != -1) {
@@ -184,7 +192,7 @@ main(int argc, char *argv[])
 			state->hd_font = 1;
 			break;
 		case 'O':
-			state->hd_bl_on = 1;
+			state->hd_bl_on = 0;
 			break;
 		case 'I':
 			state->hd_ifwidth = strtol(optarg, &endp, 10);
@@ -286,15 +294,15 @@ usage(void)
 	fprintf(stderr, "   -d      Increase debugging\n");
 	fprintf(stderr, "   -f      Specify device, default is '%s'\n", DEFAULT_DEVICE);
 	fprintf(stderr, "   -h <n>  n-line display (default 2)\n"
-			"   -w <n>  n-column display (default 20)\n"
+			"   -w <n>  n-column display (default 16)\n"
 			"   -B      Cursor blink enable\n"
 			"   -C      Cursor enable\n"
 			"   -F      Large font select\n"
 			"   -R <n>  R/S pin number (default 0)\n"
 			"   -W <n>  R/W pin number (default 1)\n"
 			"   -E <n>  E pin number (default 2)\n"
-			"   -L <n>  Backlight pin number (default none)\n"
-			"   -O      Turn backlight on (default off)\n"
+			"   -L <n>  Backlight pin number (default 3)\n"
+			"   -O      Turn backlight off (default on)\n"
 			"   -D <n>  First data pin number (default 4)\n"
 			"   -I <n>  Data interface width (only 4 is supported)\n");
 	fprintf(stderr, "  args     Message strings.\n");
@@ -363,13 +371,10 @@ do_char(struct hd44780_state *state, char ch)
 static void
 hd44780_set_pin(struct hd44780_state *state, enum hd_pin_id pin, bool on)
 {
-	struct gpio_req req;
 	int err;
 
 	assert(state->pins[pin] != -1);
-	req.gp_pin = state->pins[pin];
-	req.gp_value = on;
-	err = ioctl(state->hd_fd, GPIOSET, &req);
+	err = gpiod_line_set_value(state->hd_gpio.lines[state->pins[pin]], on);
 	if (err != 0)
 		debug(1, "%s: error %d", __func__, errno);
 }
@@ -442,41 +447,26 @@ hd44780_output4(struct hd44780_state *state, enum reg_type type, uint8_t data)
 static void
 hd44780_prepare(char *devname, struct hd44780_state *state)
 {
-	struct gpio_pin cfg;
 	int error, i;
 
-	if ((state->hd_fd = open(devname, O_RDWR, 0)) == -1)
+	if ((state->hd_gpio.chip = gpiod_chip_open_lookup(devname)) == NULL)
 		err(EX_OSFILE, "can't open '%s'", devname);
 
-	/*
-	 * Before anything else set E as input to avoid triggering
-	 * it as a possible side-effect of changing other pins.
-	 */
-	cfg.gp_pin = state->pins[HD_PIN_E];
-	cfg.gp_flags = GPIO_PIN_INPUT;
-	error = ioctl(state->hd_fd, GPIOSETCONFIG, &cfg);
-	if (error != 0)
-		err(1, "configuring pin %d as input failed",
-		    cfg.gp_pin);
-
-	/* Configure GPIO pins. */
+	/* Get all the lines */
 	for (i = 0; i < HD_PIN_COUNT; i++) {
 		if (state->pins[i] == -1)
 			continue;
-		cfg.gp_pin = state->pins[i];
-		cfg.gp_flags = GPIO_PIN_INPUT;
-		(void)ioctl(state->hd_fd, GPIOSETCONFIG, &cfg);
+		if ((state->hd_gpio.lines[state->pins[i]] = gpiod_chip_get_line(state->hd_gpio.chip, state->pins[i])) == NULL)
+			err(EX_OSFILE, "can't open line '%d'", state->pins[i]);
 	}
 
 	for (i = 0; i < HD_PIN_COUNT; i++) {
 		if (state->pins[i] == -1)
 			continue;
-		cfg.gp_pin = state->pins[i];
-		cfg.gp_flags = GPIO_PIN_OUTPUT;
-		error = ioctl(state->hd_fd, GPIOSETCONFIG, &cfg);
+		error = gpiod_line_request_output(state->hd_gpio.lines[state->pins[i]], progname, 0);
 		if (error != 0)
 			err(1, "configuring pin %d as output failed",
-			    cfg.gp_pin);
+			    state->pins[i]);
 	}
 
 	for (i = 0; i < HD_PIN_COUNT; i++) {
@@ -496,7 +486,7 @@ hd44780_prepare(char *devname, struct hd44780_state *state)
 static void
 hd44780_finish(void)
 {
-	close(hd44780_state.hd_fd);
+	gpiod_chip_close(hd44780_state.hd_gpio.chip);
 }
 
 #define	HD_CMD_CLEAR			0x01
