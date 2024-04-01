@@ -1,0 +1,14 @@
+
+For pcf8574 IO extender:
+# echo pcf8574 0x27 >/sys/bus/i2c/devices/i2c-7/new_device
+
+# gpioinfo gpiochip1
+gpiochip1 - 8 lines:
+        line   0:      unnamed    "gpiolcd"  output  active-high [used]
+        line   1:      unnamed    "gpiolcd"  output  active-high [used]
+        line   2:      unnamed    "gpiolcd"  output  active-high [used]
+        line   3:      unnamed    "gpiolcd"  output  active-high [used]
+        line   4:      unnamed    "gpiolcd"  output  active-high [used]
+        line   5:      unnamed    "gpiolcd"  output  active-high [used]
+        line   6:      unnamed    "gpiolcd"  output  active-high [used]
+        line   7:      unnamed    "gpiolcd"  output  active-high [used]
